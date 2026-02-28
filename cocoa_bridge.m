@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include "cocoa_bridge.h"
 
@@ -34,6 +35,16 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 @end
 
 @implementation MonitorAppDelegate
+
+- (void)applyAppIcon {
+    NSString *cwd = [[NSFileManager defaultManager] currentDirectoryPath];
+    NSString *iconPath = [cwd stringByAppendingPathComponent:@"FrameScopeIcon.png"];
+    NSImage *icon = [[NSImage alloc] initWithContentsOfFile:iconPath];
+    if (icon != nil) {
+        icon.size = NSMakeSize(512, 512);
+        [NSApp setApplicationIconImage:icon];
+    }
+}
 
 #pragma mark - NSToolbarDelegate
 
@@ -177,7 +188,7 @@ static NSString * const kOptionsItem    = @"OptionsItem";
                                                          NSWindowStyleMaskResizable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    [self.window setTitle:@"CPU Frame Monitor"];
+    [self.window setTitle:@"FrameScope"];
     [self.window center];
     [self.window setMinSize:NSMakeSize(700, 480)];
 
@@ -312,6 +323,7 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     self.historyItems = @[];
     [self refreshEmptyState];
     [self refreshHistoryControls];
+    [self applyAppIcon];
 
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];

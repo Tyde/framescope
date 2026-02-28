@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-const configFilePath = "monitor_cpu_config.json"
+const configFilePath = "framescope_config.json"
 
 type appConfig struct {
 	HideSmall    bool    `json:"hide_small"`
