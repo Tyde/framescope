@@ -28,6 +28,7 @@ func GoStartMonitoring(frameSeconds C.double) {
 	runID := state.runID
 	state.cancel = cancel
 	state.running = true
+	state.frameSeconds = interval
 	state.frameIndex = 1
 	state.history = nil
 	state.liveRows = nil
@@ -36,6 +37,7 @@ func GoStartMonitoring(frameSeconds C.double) {
 	state.autoFollowLatestComplete = true
 	state.status = fmt.Sprintf("Running. Frame 1 of %.1fs started.", interval)
 	state.mu.Unlock()
+	saveConfig()
 
 	go runMonitor(ctx, runID, interval)
 	pushUI(runID)
@@ -70,6 +72,7 @@ func GoSetHideSmall(enabled C.int) {
 	state.mu.Lock()
 	state.hideSmall = enabled != 0
 	state.mu.Unlock()
+	saveConfig()
 	pushUI(0)
 }
 
@@ -78,6 +81,7 @@ func GoSetHidePaths(enabled C.int) {
 	state.mu.Lock()
 	state.hidePaths = enabled != 0
 	state.mu.Unlock()
+	saveConfig()
 	pushUI(0)
 }
 
@@ -106,4 +110,31 @@ func GoSelectFrame(selectedIndex C.int) {
 	}
 	state.mu.Unlock()
 	pushUI(0)
+}
+
+//export GoInitialHideSmall
+func GoInitialHideSmall() C.int {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.hideSmall {
+		return 1
+	}
+	return 0
+}
+
+//export GoInitialHidePaths
+func GoInitialHidePaths() C.int {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.hidePaths {
+		return 1
+	}
+	return 0
+}
+
+//export GoInitialFrameSeconds
+func GoInitialFrameSeconds() C.double {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return C.double(state.frameSeconds)
 }

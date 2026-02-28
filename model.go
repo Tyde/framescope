@@ -33,6 +33,7 @@ type monitorState struct {
 	running                  bool
 	hideSmall                bool
 	hidePaths                bool
+	frameSeconds             float64
 	frameIndex               int
 	runID                    int64
 	cancel                   context.CancelFunc
@@ -45,6 +46,7 @@ type monitorState struct {
 }
 
 var state = &monitorState{
-	hideSmall: true,
-	hidePaths: false,
+	hideSmall:    true,
+	hidePaths:    false,
+	frameSeconds: 15,
 }

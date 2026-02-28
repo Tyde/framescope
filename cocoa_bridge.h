@@ -10,5 +10,8 @@ void GoStopMonitoring(void);
 void GoSetHideSmall(int enabled);
 void GoSetHidePaths(int enabled);
 void GoSelectFrame(int selectedIndex);
+int GoInitialHideSmall(void);
+int GoInitialHidePaths(void);
+double GoInitialFrameSeconds(void);
 
 #endif

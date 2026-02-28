@@ -21,49 +21,60 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	updateFrame := func(now time.Time) error {
+		current, err := snapshot()
+		if err != nil {
+			return err
+		}
+
+		results := computeResults(baseline, current)
+		state.mu.Lock()
+		state.liveRows = cloneRows(results)
+		state.status = buildStatusLocked(frameSeconds, frameStart, now, results)
+		state.mu.Unlock()
+		pushUI(runID)
+
+		if now.Sub(frameStart) >= frameDuration {
+			state.mu.Lock()
+			if !state.running {
+				state.mu.Unlock()
+				return nil
+			}
+			completedFrameIndex := state.frameIndex
+			state.history = append(state.history, frameRecord{
+				Index: completedFrameIndex,
+				Rows:  cloneRows(results),
+			})
+			if state.autoFollowLatestComplete || len(state.history) == 1 {
+				state.viewingCurrent = false
+				state.selectedHistoryIdx = len(state.history) - 1
+				state.autoFollowLatestComplete = true
+			}
+			state.frameIndex++
+			frameIndex := state.frameIndex
+			state.liveRows = nil
+			state.status = fmt.Sprintf("Running. Frame %d started. Length %.1fs.", frameIndex, frameSeconds)
+			state.mu.Unlock()
+
+			baseline = current
+			frameStart = now
+			pushUI(runID)
+		}
+
+		return nil
+	}
+
+	if err := updateFrame(frameStart); err != nil {
+		postError(runID, fmt.Sprintf("Snapshot failed: %v", err))
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			current, err := snapshot()
-			if err != nil {
+			if err := updateFrame(now); err != nil {
 				postError(runID, fmt.Sprintf("Snapshot failed: %v", err))
-				continue
-			}
-
-			results := computeResults(baseline, current)
-			state.mu.Lock()
-			state.liveRows = cloneRows(results)
-			state.status = buildStatusLocked(frameSeconds, frameStart, now, results)
-			state.mu.Unlock()
-			pushUI(runID)
-
-			if now.Sub(frameStart) >= frameDuration {
-				state.mu.Lock()
-				if !state.running {
-					state.mu.Unlock()
-					return
-				}
-				completedFrameIndex := state.frameIndex
-				state.history = append(state.history, frameRecord{
-					Index: completedFrameIndex,
-					Rows:  cloneRows(results),
-				})
-				if state.autoFollowLatestComplete || len(state.history) == 1 {
-					state.viewingCurrent = false
-					state.selectedHistoryIdx = len(state.history) - 1
-					state.autoFollowLatestComplete = true
-				}
-				state.frameIndex++
-				frameIndex := state.frameIndex
-				state.liveRows = nil
-				state.status = fmt.Sprintf("Running. Frame %d started. Length %.1fs.", frameIndex, frameSeconds)
-				state.mu.Unlock()
-
-				baseline = current
-				frameStart = now
-				pushUI(runID)
 			}
 		}
 	}

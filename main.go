@@ -10,6 +10,7 @@ import "C"
 import "runtime"
 
 func main() {
+	initializeConfig()
 	runtime.LockOSThread()
 	C.RunApp()
 }

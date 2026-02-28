@@ -14,8 +14,9 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 @property(nonatomic, strong) NSTextField   *frameField;
 @property(nonatomic, strong) NSButton      *startButton;
 @property(nonatomic, strong) NSButton      *stopButton;
-@property(nonatomic, strong) NSButton      *hideSmallButton;
-@property(nonatomic, strong) NSButton      *hidePathsButton;
+@property(nonatomic, strong) NSButton      *settingsButton;
+@property(nonatomic, strong) NSMenuItem    *hideSmallMenuItem;
+@property(nonatomic, strong) NSMenuItem    *hidePathsMenuItem;
 @property(nonatomic, strong) NSPopUpButton *historyPopup;
 @property(nonatomic, strong) NSButton      *previousFrameButton;
 @property(nonatomic, strong) NSButton      *nextFrameButton;
@@ -65,7 +66,7 @@ static NSString * const kOptionsItem    = @"OptionsItem";
         [c addSubview:lbl];
 
         self.frameField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 5, 54, 24)];
-        self.frameField.stringValue = @"5";
+        self.frameField.stringValue = [NSString stringWithFormat:@"%.0f", GoInitialFrameSeconds()];
         self.frameField.font = [NSFont systemFontOfSize:13];
         [c addSubview:self.frameField];
 
@@ -129,30 +130,35 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     }
 
     if ([identifier isEqualToString:kOptionsItem]) {
-        // [ ☑ Hide <1s   ☐ Basename only ]
-        NSView *c = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 226, 32)];
+        self.settingsButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 96, 28)];
+        self.settingsButton.title = @"Settings";
+        self.settingsButton.bezelStyle = NSBezelStyleRounded;
+        self.settingsButton.target = self;
+        self.settingsButton.action = @selector(showSettingsMenu:);
 
-        self.hideSmallButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 7, 106, 20)];
-        self.hideSmallButton.title = @"Hide <1s";
-        self.hideSmallButton.buttonType = NSButtonTypeSwitch;
-        self.hideSmallButton.state = NSControlStateValueOn;
-        self.hideSmallButton.target = self;
-        self.hideSmallButton.action = @selector(hideSmallToggled:);
-        [c addSubview:self.hideSmallButton];
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Settings"];
 
-        self.hidePathsButton = [[NSButton alloc] initWithFrame:NSMakeRect(114, 7, 112, 20)];
-        self.hidePathsButton.title = @"Basename only";
-        self.hidePathsButton.buttonType = NSButtonTypeSwitch;
-        self.hidePathsButton.target = self;
-        self.hidePathsButton.action = @selector(hidePathsToggled:);
-        [c addSubview:self.hidePathsButton];
+        self.hideSmallMenuItem = [[NSMenuItem alloc] initWithTitle:@"Hide processes below 1s"
+                                                            action:@selector(hideSmallToggled:)
+                                                     keyEquivalent:@""];
+        self.hideSmallMenuItem.target = self;
+        self.hideSmallMenuItem.state = GoInitialHideSmall() ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:self.hideSmallMenuItem];
 
-        item.view = c;
+        self.hidePathsMenuItem = [[NSMenuItem alloc] initWithTitle:@"Show basenames only"
+                                                            action:@selector(hidePathsToggled:)
+                                                     keyEquivalent:@""];
+        self.hidePathsMenuItem.target = self;
+        self.hidePathsMenuItem.state = GoInitialHidePaths() ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:self.hidePathsMenuItem];
+
+        item.view = self.settingsButton;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        item.minSize = NSMakeSize(226, 32);
-        item.maxSize = NSMakeSize(226, 32);
+        item.minSize = NSMakeSize(96, 28);
+        item.maxSize = NSMakeSize(96, 28);
 #pragma clang diagnostic pop
+        self.settingsButton.menu = menu;
         return item;
     }
 
@@ -309,6 +315,9 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        GoStartMonitoring(self.frameField.doubleValue);
+    });
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
@@ -331,12 +340,24 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 - (void)hideSmallToggled:(id)sender {
     (void)sender;
-    GoSetHideSmall(self.hideSmallButton.state == NSControlStateValueOn ? 1 : 0);
+    self.hideSmallMenuItem.state =
+        (self.hideSmallMenuItem.state == NSControlStateValueOn) ? NSControlStateValueOff : NSControlStateValueOn;
+    GoSetHideSmall(self.hideSmallMenuItem.state == NSControlStateValueOn ? 1 : 0);
 }
 
 - (void)hidePathsToggled:(id)sender {
     (void)sender;
-    GoSetHidePaths(self.hidePathsButton.state == NSControlStateValueOn ? 1 : 0);
+    self.hidePathsMenuItem.state =
+        (self.hidePathsMenuItem.state == NSControlStateValueOn) ? NSControlStateValueOff : NSControlStateValueOn;
+    GoSetHidePaths(self.hidePathsMenuItem.state == NSControlStateValueOn ? 1 : 0);
+}
+
+- (void)showSettingsMenu:(id)sender {
+    NSButton *button = (NSButton *)sender;
+    if (button.menu == nil) return;
+    [button.menu popUpMenuPositioningItem:nil
+                               atLocation:NSMakePoint(0, NSHeight(button.bounds) + 4)
+                                   inView:button];
 }
 
 - (void)historyChanged:(id)sender {
