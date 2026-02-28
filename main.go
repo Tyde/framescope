@@ -32,14 +32,25 @@ type resultRow struct {
 	Command string
 }
 
+type frameRecord struct {
+	Index int
+	Rows  []resultRow
+}
+
 type monitorState struct {
-	mu         sync.Mutex
-	running    bool
-	hideSmall  bool
-	hidePaths  bool
-	frameIndex int
-	runID      int64
-	cancel     context.CancelFunc
+	mu                       sync.Mutex
+	running                  bool
+	hideSmall                bool
+	hidePaths                bool
+	frameIndex               int
+	runID                    int64
+	cancel                   context.CancelFunc
+	history                  []frameRecord
+	liveRows                 []resultRow
+	selectedHistoryIdx       int
+	viewingCurrent           bool
+	autoFollowLatestComplete bool
+	status                   string
 }
 
 var state = &monitorState{
@@ -71,9 +82,16 @@ func GoStartMonitoring(frameSeconds C.double) {
 	state.cancel = cancel
 	state.running = true
 	state.frameIndex = 1
+	state.history = nil
+	state.liveRows = nil
+	state.selectedHistoryIdx = -1
+	state.viewingCurrent = true
+	state.autoFollowLatestComplete = true
+	state.status = fmt.Sprintf("Running. Frame 1 of %.1fs started.", interval)
 	state.mu.Unlock()
 
 	go runMonitor(ctx, runID, interval)
+	pushUI(runID)
 }
 
 //export GoStopMonitoring
@@ -89,7 +107,15 @@ func GoStopMonitoring() {
 		cancel()
 	}
 
-	postUpdate(0, "Monitoring stopped.", "Press Start to begin a new measurement loop.")
+	state.mu.Lock()
+	state.status = "Monitoring stopped."
+	if len(state.history) > 0 && state.autoFollowLatestComplete {
+		state.viewingCurrent = false
+		state.selectedHistoryIdx = len(state.history) - 1
+	}
+	state.mu.Unlock()
+
+	pushUI(0)
 }
 
 //export GoSetHideSmall
@@ -97,6 +123,7 @@ func GoSetHideSmall(enabled C.int) {
 	state.mu.Lock()
 	state.hideSmall = enabled != 0
 	state.mu.Unlock()
+	pushUI(0)
 }
 
 //export GoSetHidePaths
@@ -104,6 +131,34 @@ func GoSetHidePaths(enabled C.int) {
 	state.mu.Lock()
 	state.hidePaths = enabled != 0
 	state.mu.Unlock()
+	pushUI(0)
+}
+
+//export GoSelectFrame
+func GoSelectFrame(selectedIndex C.int) {
+	state.mu.Lock()
+	index := int(selectedIndex)
+	completedCount := len(state.history)
+	currentIndex := -1
+	if state.running {
+		currentIndex = completedCount
+	}
+
+	switch {
+	case index == currentIndex:
+		state.viewingCurrent = true
+		state.selectedHistoryIdx = -1
+		state.autoFollowLatestComplete = false
+	case index >= 0 && index < completedCount:
+		state.viewingCurrent = false
+		state.selectedHistoryIdx = index
+		state.autoFollowLatestComplete = index == completedCount-1
+	default:
+		state.mu.Unlock()
+		return
+	}
+	state.mu.Unlock()
+	pushUI(0)
 }
 
 func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
@@ -119,12 +174,6 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	postUpdate(
-		runID,
-		fmt.Sprintf("Running. Frame 1 of %.1fs started.", frameSeconds),
-		"Collecting initial samples...",
-	)
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -137,8 +186,11 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 			}
 
 			results := computeResults(baseline, current)
-			status := buildStatus(frameSeconds, frameStart, now, results)
-			postUpdate(runID, status, renderTable(results))
+			state.mu.Lock()
+			state.liveRows = cloneRows(results)
+			state.status = buildStatusLocked(frameSeconds, frameStart, now, results)
+			state.mu.Unlock()
+			pushUI(runID)
 
 			if now.Sub(frameStart) >= frameDuration {
 				state.mu.Lock()
@@ -146,17 +198,25 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 					state.mu.Unlock()
 					return
 				}
+				completedFrameIndex := state.frameIndex
+				state.history = append(state.history, frameRecord{
+					Index: completedFrameIndex,
+					Rows:  cloneRows(results),
+				})
+				if state.autoFollowLatestComplete || len(state.history) == 1 {
+					state.viewingCurrent = false
+					state.selectedHistoryIdx = len(state.history) - 1
+					state.autoFollowLatestComplete = true
+				}
 				state.frameIndex++
 				frameIndex := state.frameIndex
+				state.liveRows = nil
+				state.status = fmt.Sprintf("Running. Frame %d started. Length %.1fs.", frameIndex, frameSeconds)
 				state.mu.Unlock()
 
 				baseline = current
 				frameStart = now
-				postUpdate(
-					runID,
-					fmt.Sprintf("Frame %d started. Length %.1fs.", frameIndex, frameSeconds),
-					renderTable(nil),
-				)
+				pushUI(runID)
 			}
 		}
 	}
@@ -237,11 +297,10 @@ func computeResults(initial, current map[int]processSample) []resultRow {
 	return rows
 }
 
-func buildStatus(frameSeconds float64, frameStart, now time.Time, rows []resultRow) string {
-	state.mu.Lock()
+func buildStatusLocked(frameSeconds float64, frameStart, now time.Time, rows []resultRow) string {
 	frameIndex := state.frameIndex
 	hideSmall := state.hideSmall
-	state.mu.Unlock()
+	viewLabel := currentViewLabelLocked()
 
 	elapsed := now.Sub(frameStart).Seconds()
 	if elapsed < 0 {
@@ -263,21 +322,17 @@ func buildStatus(frameSeconds float64, frameStart, now time.Time, rows []resultR
 	}
 
 	return fmt.Sprintf(
-		"Running. Frame %d | length %.1fs | elapsed %.1fs | remaining %.1fs | %d visible processes",
+		"Running. Frame %d | length %.1fs | elapsed %.1fs | remaining %.1fs | %d visible processes | viewing %s",
 		frameIndex,
 		frameSeconds,
 		elapsed,
 		remaining,
 		visibleRows,
+		viewLabel,
 	)
 }
 
-func renderTable(rows []resultRow) string {
-	state.mu.Lock()
-	hideSmall := state.hideSmall
-	hidePaths := state.hidePaths
-	state.mu.Unlock()
-
+func renderTable(rows []resultRow, hideSmall, hidePaths bool) string {
 	filtered := make([]resultRow, 0, len(rows))
 	for _, row := range rows {
 		if hideSmall && row.Diff < 1 {
@@ -286,17 +341,11 @@ func renderTable(rows []resultRow) string {
 		filtered = append(filtered, row)
 	}
 
-	if len(filtered) == 0 {
-		return " PID      Raw(s)   CPU Time     Command\n\n No processes match the current filters yet."
-	}
-
 	var b strings.Builder
-	b.WriteString(" PID      Raw(s)   CPU Time     Command\n")
-	b.WriteString(" -----------------------------------------------")
 
 	limit := len(filtered)
-	if limit > 100 {
-		limit = 100
+	if limit > 500 {
+		limit = 500
 	}
 
 	for i := 0; i < limit; i++ {
@@ -305,23 +354,68 @@ func renderTable(rows []resultRow) string {
 		if hidePaths {
 			command = baseCommand(command)
 		}
-		command = truncate(command, 100)
-
-		fmt.Fprintf(
-			&b,
-			"\n %-8d %-8.1f %-12s %s",
-			row.PID,
-			row.Diff,
-			formatDuration(row.Diff),
-			command,
-		)
-	}
-
-	if len(filtered) > limit {
-		fmt.Fprintf(&b, "\n\n Showing top %d of %d rows.", limit, len(filtered))
+		command = strings.ReplaceAll(command, "\t", " ")
+		command = strings.ReplaceAll(command, "\n", " ")
+		fmt.Fprintf(&b, "%d\t%.1f\t%s\t%s\n", row.PID, row.Diff, formatDuration(row.Diff), command)
 	}
 
 	return b.String()
+}
+
+func cloneRows(rows []resultRow) []resultRow {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]resultRow, len(rows))
+	copy(out, rows)
+	return out
+}
+
+func currentViewLabelLocked() string {
+	if state.viewingCurrent {
+		if state.running {
+			return fmt.Sprintf("Current Frame %d", state.frameIndex)
+		}
+		return "Current Frame"
+	}
+	if state.selectedHistoryIdx >= 0 && state.selectedHistoryIdx < len(state.history) {
+		return fmt.Sprintf("Frame %d", state.history[state.selectedHistoryIdx].Index)
+	}
+	return "Latest Frame"
+}
+
+func currentRowsLocked() []resultRow {
+	if state.viewingCurrent {
+		return cloneRows(state.liveRows)
+	}
+	if state.selectedHistoryIdx >= 0 && state.selectedHistoryIdx < len(state.history) {
+		return cloneRows(state.history[state.selectedHistoryIdx].Rows)
+	}
+	if len(state.history) > 0 {
+		return cloneRows(state.history[len(state.history)-1].Rows)
+	}
+	return cloneRows(state.liveRows)
+}
+
+func historyPayloadLocked() (string, int) {
+	items := make([]string, 0, len(state.history)+1)
+	selected := -1
+
+	for i, frame := range state.history {
+		items = append(items, fmt.Sprintf("Frame %d", frame.Index))
+		if !state.viewingCurrent && state.selectedHistoryIdx == i {
+			selected = i
+		}
+	}
+
+	if state.running {
+		items = append(items, fmt.Sprintf("Current Frame %d (in progress)", state.frameIndex))
+		if state.viewingCurrent {
+			selected = len(items) - 1
+		}
+	}
+
+	return strings.Join(items, "\n"), selected
 }
 
 func baseCommand(command string) string {
@@ -333,16 +427,6 @@ func baseCommand(command string) string {
 	return parts[len(parts)-1]
 }
 
-func truncate(value string, width int) string {
-	if len(value) <= width {
-		return value
-	}
-	if width <= 3 {
-		return value[:width]
-	}
-	return value[:width-3] + "..."
-}
-
 func formatDuration(seconds float64) string {
 	total := int(seconds)
 	hours := total / 3600
@@ -351,15 +435,29 @@ func formatDuration(seconds float64) string {
 	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, secs)
 }
 
-func postUpdate(runID int64, status, table string) {
+func pushUI(runID int64) {
+	state.mu.Lock()
+	status := state.status
+	hideSmall := state.hideSmall
+	hidePaths := state.hidePaths
+	rows := currentRowsLocked()
+	historyText, selectedIndex := historyPayloadLocked()
+	state.mu.Unlock()
+	table := renderTable(rows, hideSmall, hidePaths)
+	postUpdate(runID, status, table, historyText, selectedIndex)
+}
+
+func postUpdate(runID int64, status, table, historyText string, selectedIndex int) {
 	if !isCurrentRun(runID) {
 		return
 	}
 	cStatus := C.CString(status)
 	cTable := C.CString(table)
-	C.UpdateResults(cStatus, cTable)
+	cHistory := C.CString(historyText)
+	C.UpdateResults(cStatus, cTable, cHistory, C.int(selectedIndex))
 	C.free(unsafe.Pointer(cStatus))
 	C.free(unsafe.Pointer(cTable))
+	C.free(unsafe.Pointer(cHistory))
 }
 
 func postError(runID int64, message string) {
