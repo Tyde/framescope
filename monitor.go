@@ -40,11 +40,18 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 				state.mu.Unlock()
 				return nil
 			}
+			const maxHistory = 1000
 			completedFrameIndex := state.frameIndex
 			state.history = append(state.history, frameRecord{
 				Index: completedFrameIndex,
 				Rows:  cloneRows(results),
 			})
+			if len(state.history) > maxHistory {
+				state.history = state.history[1:]
+				if state.selectedHistoryIdx > 0 {
+					state.selectedHistoryIdx--
+				}
+			}
 			if state.autoFollowLatestComplete || len(state.history) == 1 {
 				state.viewingCurrent = false
 				state.selectedHistoryIdx = len(state.history) - 1

@@ -3,9 +3,16 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 )
 
-const configFilePath = "framescope_config.json"
+func configPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "FrameScope", "config.json"), nil
+}
 
 type appConfig struct {
 	HideSmall    bool    `json:"hide_small"`
@@ -14,7 +21,11 @@ type appConfig struct {
 }
 
 func initializeConfig() {
-	data, err := os.ReadFile(configFilePath)
+	path, err := configPath()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
@@ -47,5 +58,12 @@ func saveConfig() {
 		return
 	}
 
-	_ = os.WriteFile(configFilePath, data, 0644)
+	path, err := configPath()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0600)
 }
