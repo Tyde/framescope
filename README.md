@@ -105,3 +105,9 @@ The file stores the last-used frame length and the Hide/Basename checkbox states
 ## License
 
 MIT
+
+---
+
+## Notice
+
+This project was created entirely with the assistance of large language models — the initial codebase was written with [OpenAI Codex](https://openai.com/index/openai-codex/) and subsequently developed and maintained with [Claude](https://claude.ai) (Anthropic). No code was written by hand.
