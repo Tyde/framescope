@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include "cocoa_bridge.h"
 
+static NSString *gAppVersion = @"dev";
+
 static NSString * const kRecordingItem  = @"RecordingItem";
 static NSString * const kNavigationItem = @"NavigationItem";
 static NSString * const kOptionsItem    = @"OptionsItem";
@@ -188,7 +190,7 @@ static NSString * const kOptionsItem    = @"OptionsItem";
                                                          NSWindowStyleMaskResizable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    [self.window setTitle:@"FrameScope"];
+    [self.window setTitle:[NSString stringWithFormat:@"FrameScope %@", gAppVersion]];
     [self.window center];
     [self.window setMinSize:NSMakeSize(700, 480)];
 
@@ -535,6 +537,12 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 #pragma mark - C interface
 
 static MonitorAppDelegate *delegate;
+
+void SetAppVersion(const char *version) {
+    if (version) {
+        gAppVersion = [NSString stringWithUTF8String:version];
+    }
+}
 
 void RunApp(void) {
     @autoreleasepool {

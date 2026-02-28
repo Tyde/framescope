@@ -20,17 +20,20 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build binary
-        run: go build -o FrameScope .
-
       - name: Determine version
         id: version
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             echo "value=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           else
-            echo "value=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+            base=$(cat VERSION | tr -d '[:space:]')
+            echo "value=${base}-${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Build binary
+        run: |
+          go build -ldflags "-X main.version=${{ steps.version.outputs.value }}" \
+            -o FrameScope .
 
       - name: Assemble .app bundle
         env:
