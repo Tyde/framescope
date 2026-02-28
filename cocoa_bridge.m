@@ -17,7 +17,12 @@
 @property(nonatomic, strong) NSScrollView *tableScrollView;
 @property(nonatomic, strong) NSTableView *resultsTable;
 @property(nonatomic, strong) NSTextField *emptyLabel;
-@property(nonatomic, copy) NSArray<NSArray<NSString *> *> *rows;
+@property(nonatomic, strong) NSScrollView *summaryScrollView;
+@property(nonatomic, strong) NSTableView *summaryTable;
+@property(nonatomic, strong) NSTextField *summaryLabel;
+@property(nonatomic, strong) NSTextField *summaryEmptyLabel;
+@property(nonatomic, copy) NSArray<NSArray<NSString *> *> *frameRows;
+@property(nonatomic, copy) NSArray<NSArray<NSString *> *> *summaryRows;
 @property(nonatomic, copy) NSArray<NSString *> *historyItems;
 @property(nonatomic, assign) BOOL updatingHistorySelection;
 @end
@@ -27,7 +32,7 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
 
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 980, 680)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1080, 860)
                                               styleMask:(NSWindowStyleMaskTitled |
                                                          NSWindowStyleMaskClosable |
                                                          NSWindowStyleMaskMiniaturizable |
@@ -36,69 +41,73 @@
                                                   defer:NO];
     [self.window setTitle:@"CPU Frame Monitor"];
     [self.window center];
-    [self.window setMinSize:NSMakeSize(720, 420)];
+    [self.window setMinSize:NSMakeSize(860, 620)];
 
     NSView *content = self.window.contentView;
     content.autoresizesSubviews = YES;
 
-    NSTextField *title = [self label:@"Continuous CPU sampling in rolling frames" frame:NSMakeRect(20, 630, 420, 24)];
+    NSTextField *title = [self label:@"Continuous CPU sampling in rolling frames" frame:NSMakeRect(20, 810, 420, 24)];
     title.font = [NSFont boldSystemFontOfSize:18];
     title.autoresizingMask = NSViewMinYMargin;
     [content addSubview:title];
 
-    NSTextField *frameLabel = [self label:@"Frame seconds" frame:NSMakeRect(20, 592, 110, 24)];
+    NSTextField *frameLabel = [self label:@"Frame seconds" frame:NSMakeRect(20, 772, 110, 24)];
     frameLabel.autoresizingMask = NSViewMinYMargin;
     [content addSubview:frameLabel];
 
-    self.frameField = [[NSTextField alloc] initWithFrame:NSMakeRect(132, 588, 90, 28)];
+    self.frameField = [[NSTextField alloc] initWithFrame:NSMakeRect(132, 768, 90, 28)];
     self.frameField.stringValue = @"5";
     self.frameField.autoresizingMask = NSViewMinYMargin;
     [content addSubview:self.frameField];
 
-    self.startButton = [self button:@"Start" frame:NSMakeRect(236, 586, 92, 32) action:@selector(startPressed:)];
+    self.startButton = [self button:@"Start" frame:NSMakeRect(236, 766, 92, 32) action:@selector(startPressed:)];
     self.startButton.autoresizingMask = NSViewMinYMargin;
     [content addSubview:self.startButton];
 
-    self.stopButton = [self button:@"Stop" frame:NSMakeRect(338, 586, 92, 32) action:@selector(stopPressed:)];
+    self.stopButton = [self button:@"Stop" frame:NSMakeRect(338, 766, 92, 32) action:@selector(stopPressed:)];
     self.stopButton.autoresizingMask = NSViewMinYMargin;
     [content addSubview:self.stopButton];
 
-    self.hideSmallButton = [self checkbox:@"Hide rows below 1s" frame:NSMakeRect(450, 590, 170, 24) action:@selector(hideSmallToggled:)];
+    self.hideSmallButton = [self checkbox:@"Hide rows below 1s" frame:NSMakeRect(450, 770, 170, 24) action:@selector(hideSmallToggled:)];
     self.hideSmallButton.state = NSControlStateValueOn;
     self.hideSmallButton.autoresizingMask = NSViewMinYMargin;
     [content addSubview:self.hideSmallButton];
 
-    self.hidePathsButton = [self checkbox:@"Show basename only" frame:NSMakeRect(630, 590, 160, 24) action:@selector(hidePathsToggled:)];
+    self.hidePathsButton = [self checkbox:@"Show basename only" frame:NSMakeRect(630, 770, 160, 24) action:@selector(hidePathsToggled:)];
     self.hidePathsButton.autoresizingMask = NSViewMinYMargin;
     [content addSubview:self.hidePathsButton];
 
-    self.historyLabel = [self label:@"View" frame:NSMakeRect(20, 552, 48, 24)];
+    self.historyLabel = [self label:@"View" frame:NSMakeRect(20, 732, 48, 24)];
     self.historyLabel.autoresizingMask = NSViewMinYMargin;
     [content addSubview:self.historyLabel];
 
-    self.historyPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(68, 548, 250, 28) pullsDown:NO];
+    self.historyPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(68, 728, 250, 28) pullsDown:NO];
     self.historyPopup.target = self;
     self.historyPopup.action = @selector(historyChanged:);
     self.historyPopup.autoresizingMask = NSViewMinYMargin;
     self.historyPopup.enabled = NO;
     [content addSubview:self.historyPopup];
 
-    self.previousFrameButton = [self button:@"Previous" frame:NSMakeRect(332, 546, 96, 32) action:@selector(previousFrame:)];
+    self.previousFrameButton = [self button:@"Previous" frame:NSMakeRect(332, 726, 96, 32) action:@selector(previousFrame:)];
     self.previousFrameButton.autoresizingMask = NSViewMinYMargin;
     self.previousFrameButton.enabled = NO;
     [content addSubview:self.previousFrameButton];
 
-    self.nextFrameButton = [self button:@"Next" frame:NSMakeRect(438, 546, 80, 32) action:@selector(nextFrame:)];
+    self.nextFrameButton = [self button:@"Next" frame:NSMakeRect(438, 726, 80, 32) action:@selector(nextFrame:)];
     self.nextFrameButton.autoresizingMask = NSViewMinYMargin;
     self.nextFrameButton.enabled = NO;
     [content addSubview:self.nextFrameButton];
 
-    self.statusLabel = [self label:@"Idle. Set a frame length and press Start." frame:NSMakeRect(20, 516, 920, 24)];
+    self.statusLabel = [self label:@"Idle. Set a frame length and press Start." frame:NSMakeRect(20, 696, 1040, 24)];
     self.statusLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
     self.statusLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
     [content addSubview:self.statusLabel];
 
-    self.tableScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 20, 940, 478)];
+    NSView *framesPane = [[NSView alloc] initWithFrame:NSMakeRect(20, 360, 1040, 310)];
+    framesPane.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:framesPane];
+
+    self.tableScrollView = [[NSScrollView alloc] initWithFrame:framesPane.bounds];
     self.tableScrollView.hasVerticalScroller = YES;
     self.tableScrollView.hasHorizontalScroller = YES;
     self.tableScrollView.autohidesScrollers = YES;
@@ -123,14 +132,58 @@
     [self.resultsTable addTableColumn:commandColumn];
 
     self.tableScrollView.documentView = self.resultsTable;
-    [content addSubview:self.tableScrollView];
+    [framesPane addSubview:self.tableScrollView];
 
     self.emptyLabel = [self label:@"Press Start to begin." frame:NSMakeRect(32, 36, 320, 22)];
     self.emptyLabel.textColor = [NSColor secondaryLabelColor];
     self.emptyLabel.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
-    [content addSubview:self.emptyLabel];
+    [framesPane addSubview:self.emptyLabel];
 
-    self.rows = @[];
+    NSView *summaryPane = [[NSView alloc] initWithFrame:NSMakeRect(20, 20, 1040, 300)];
+    summaryPane.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+    [content addSubview:summaryPane];
+
+    self.summaryLabel = [self label:@"Totals and averages across completed frames" frame:NSMakeRect(0, 276, 360, 20)];
+    self.summaryLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightSemibold];
+    self.summaryLabel.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [summaryPane addSubview:self.summaryLabel];
+
+    self.summaryScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 1040, 266)];
+    self.summaryScrollView.hasVerticalScroller = YES;
+    self.summaryScrollView.hasHorizontalScroller = YES;
+    self.summaryScrollView.autohidesScrollers = YES;
+    self.summaryScrollView.borderType = NSBezelBorder;
+    self.summaryScrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    self.summaryTable = [[NSTableView alloc] initWithFrame:self.summaryScrollView.bounds];
+    self.summaryTable.usesAlternatingRowBackgroundColors = YES;
+    self.summaryTable.allowsColumnResizing = YES;
+    self.summaryTable.allowsTypeSelect = YES;
+    self.summaryTable.rowSizeStyle = NSTableViewRowSizeStyleDefault;
+    self.summaryTable.gridStyleMask = NSTableViewSolidVerticalGridLineMask;
+    self.summaryTable.dataSource = self;
+    self.summaryTable.delegate = self;
+    self.summaryTable.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    [self.summaryTable addTableColumn:[self tableColumnWithID:@"sum_pid" title:@"PID" width:90 minWidth:70]];
+    [self.summaryTable addTableColumn:[self tableColumnWithID:@"sum_total" title:@"Total(s)" width:90 minWidth:70]];
+    [self.summaryTable addTableColumn:[self tableColumnWithID:@"sum_avg" title:@"Avg(s)" width:90 minWidth:70]];
+    [self.summaryTable addTableColumn:[self tableColumnWithID:@"sum_total_cpu" title:@"Total CPU" width:110 minWidth:90]];
+    [self.summaryTable addTableColumn:[self tableColumnWithID:@"sum_avg_cpu" title:@"Avg CPU" width:110 minWidth:90]];
+    NSTableColumn *summaryCommandColumn = [self tableColumnWithID:@"sum_command" title:@"Command" width:450 minWidth:180];
+    summaryCommandColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+    [self.summaryTable addTableColumn:summaryCommandColumn];
+
+    self.summaryScrollView.documentView = self.summaryTable;
+    [summaryPane addSubview:self.summaryScrollView];
+
+    self.summaryEmptyLabel = [self label:@"Completed frames will appear here." frame:NSMakeRect(12, 12, 280, 18)];
+    self.summaryEmptyLabel.textColor = [NSColor secondaryLabelColor];
+    self.summaryEmptyLabel.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+    [summaryPane addSubview:self.summaryEmptyLabel];
+
+    self.frameRows = @[];
+    self.summaryRows = @[];
     self.historyItems = @[];
     [self refreshEmptyState];
     [self refreshHistoryControls];
@@ -212,14 +265,15 @@
 }
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    (void)tableView;
-    return self.rows.count;
+    if (tableView == self.summaryTable) {
+        return self.summaryRows.count;
+    }
+    return self.frameRows.count;
 }
 
 - (nullable NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
-    (void)tableView;
     NSString *identifier = tableColumn.identifier;
-    NSTextField *cell = [self.resultsTable makeViewWithIdentifier:identifier owner:self];
+    NSTextField *cell = [tableView makeViewWithIdentifier:identifier owner:self];
     if (cell == nil) {
         cell = [[NSTextField alloc] initWithFrame:NSZeroRect];
         cell.identifier = identifier;
@@ -231,14 +285,15 @@
         cell.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
     }
 
-    NSArray<NSString *> *rowValues = self.rows[(NSUInteger)row];
-    NSUInteger columnIndex = [self.resultsTable.tableColumns indexOfObject:tableColumn];
+    NSArray<NSArray<NSString *> *> *sourceRows = (tableView == self.summaryTable) ? self.summaryRows : self.frameRows;
+    NSArray<NSString *> *rowValues = sourceRows[(NSUInteger)row];
+    NSUInteger columnIndex = [tableView.tableColumns indexOfObject:tableColumn];
     cell.stringValue = columnIndex < rowValues.count ? rowValues[columnIndex] : @"";
     cell.toolTip = cell.stringValue;
     return cell;
 }
 
-- (void)applyRowsPayload:(NSString *)payload {
+- (NSArray<NSArray<NSString *> *> *)parseRowsPayload:(NSString *)payload expectedColumns:(NSUInteger)expectedColumns {
     NSMutableArray<NSArray<NSString *> *> *parsedRows = [NSMutableArray array];
     NSArray<NSString *> *lines = [payload componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]];
     for (NSString *line in lines) {
@@ -247,13 +302,23 @@
         }
         NSArray<NSString *> *parts = [line componentsSeparatedByString:@"\t"];
         NSMutableArray<NSString *> *row = [NSMutableArray arrayWithArray:parts];
-        while (row.count < 4) {
+        while (row.count < expectedColumns) {
             [row addObject:@""];
         }
         [parsedRows addObject:row];
     }
-    self.rows = parsedRows;
+    return parsedRows;
+}
+
+- (void)applyRowsPayload:(NSString *)payload {
+    self.frameRows = [self parseRowsPayload:payload expectedColumns:4];
     [self.resultsTable reloadData];
+    [self refreshEmptyState];
+}
+
+- (void)applySummaryPayload:(NSString *)payload {
+    self.summaryRows = [self parseRowsPayload:payload expectedColumns:6];
+    [self.summaryTable reloadData];
     [self refreshEmptyState];
 }
 
@@ -280,7 +345,8 @@
 }
 
 - (void)refreshEmptyState {
-    self.emptyLabel.hidden = (self.rows.count != 0);
+    self.emptyLabel.hidden = (self.frameRows.count != 0);
+    self.summaryEmptyLabel.hidden = (self.summaryRows.count != 0);
 }
 
 - (void)refreshHistoryControls {
@@ -323,13 +389,15 @@ void RunApp(void) {
     }
 }
 
-void UpdateResults(const char *status, const char *tableText, const char *historyText, int selectedIndex) {
+void UpdateResults(const char *status, const char *tableText, const char *summaryText, const char *historyText, int selectedIndex) {
     NSString *statusString = [NSString stringWithUTF8String:status ?: ""];
     NSString *tableString = [NSString stringWithUTF8String:tableText ?: ""];
+    NSString *summaryString = [NSString stringWithUTF8String:summaryText ?: ""];
     NSString *historyString = [NSString stringWithUTF8String:historyText ?: ""];
     dispatch_async(dispatch_get_main_queue(), ^{
         delegate.statusLabel.stringValue = statusString;
         [delegate applyRowsPayload:tableString];
+        [delegate applySummaryPayload:summaryString];
         [delegate applyHistoryPayload:historyString selectedIndex:selectedIndex];
     });
 }
@@ -339,6 +407,7 @@ void ShowErrorMessage(const char *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         delegate.statusLabel.stringValue = text;
         [delegate applyRowsPayload:@""];
+        [delegate applySummaryPayload:@""];
         [delegate applyHistoryPayload:@"" selectedIndex:-1];
     });
 }

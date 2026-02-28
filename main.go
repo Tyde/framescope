@@ -37,6 +37,13 @@ type frameRecord struct {
 	Rows  []resultRow
 }
 
+type aggregateRow struct {
+	PID     int
+	Total   float64
+	Average float64
+	Command string
+}
+
 type monitorState struct {
 	mu                       sync.Mutex
 	running                  bool
@@ -362,6 +369,79 @@ func renderTable(rows []resultRow, hideSmall, hidePaths bool) string {
 	return b.String()
 }
 
+func renderSummaryTable(history []frameRecord, hideSmall, hidePaths bool) string {
+	frameCount := len(history)
+	if frameCount == 0 {
+		return ""
+	}
+
+	type aggregateState struct {
+		total   float64
+		command string
+	}
+
+	aggregates := make(map[int]aggregateState)
+	for _, frame := range history {
+		for _, row := range frame.Rows {
+			entry := aggregates[row.PID]
+			entry.total += row.Diff
+			if entry.command == "" {
+				entry.command = row.Command
+			}
+			aggregates[row.PID] = entry
+		}
+	}
+
+	rows := make([]aggregateRow, 0, len(aggregates))
+	for pid, entry := range aggregates {
+		avg := entry.total / float64(frameCount)
+		if hideSmall && entry.total < 1 {
+			continue
+		}
+		rows = append(rows, aggregateRow{
+			PID:     pid,
+			Total:   entry.total,
+			Average: avg,
+			Command: entry.command,
+		})
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Total == rows[j].Total {
+			return rows[i].PID < rows[j].PID
+		}
+		return rows[i].Total > rows[j].Total
+	})
+
+	var b strings.Builder
+	limit := len(rows)
+	if limit > 500 {
+		limit = 500
+	}
+
+	for i := 0; i < limit; i++ {
+		row := rows[i]
+		command := row.Command
+		if hidePaths {
+			command = baseCommand(command)
+		}
+		command = strings.ReplaceAll(command, "\t", " ")
+		command = strings.ReplaceAll(command, "\n", " ")
+		fmt.Fprintf(
+			&b,
+			"%d\t%.1f\t%.1f\t%s\t%s\t%s\n",
+			row.PID,
+			row.Total,
+			row.Average,
+			formatDuration(row.Total),
+			formatDuration(row.Average),
+			command,
+		)
+	}
+
+	return b.String()
+}
+
 func cloneRows(rows []resultRow) []resultRow {
 	if len(rows) == 0 {
 		return nil
@@ -441,22 +521,26 @@ func pushUI(runID int64) {
 	hideSmall := state.hideSmall
 	hidePaths := state.hidePaths
 	rows := currentRowsLocked()
+	history := append([]frameRecord(nil), state.history...)
 	historyText, selectedIndex := historyPayloadLocked()
 	state.mu.Unlock()
 	table := renderTable(rows, hideSmall, hidePaths)
-	postUpdate(runID, status, table, historyText, selectedIndex)
+	summary := renderSummaryTable(history, hideSmall, hidePaths)
+	postUpdate(runID, status, table, summary, historyText, selectedIndex)
 }
 
-func postUpdate(runID int64, status, table, historyText string, selectedIndex int) {
+func postUpdate(runID int64, status, table, summary, historyText string, selectedIndex int) {
 	if !isCurrentRun(runID) {
 		return
 	}
 	cStatus := C.CString(status)
 	cTable := C.CString(table)
+	cSummary := C.CString(summary)
 	cHistory := C.CString(historyText)
-	C.UpdateResults(cStatus, cTable, cHistory, C.int(selectedIndex))
+	C.UpdateResults(cStatus, cTable, cSummary, cHistory, C.int(selectedIndex))
 	C.free(unsafe.Pointer(cStatus))
 	C.free(unsafe.Pointer(cTable))
+	C.free(unsafe.Pointer(cSummary))
 	C.free(unsafe.Pointer(cHistory))
 }
 
