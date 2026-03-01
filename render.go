@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// buildStatusLocked composes the status-bar string shown while monitoring is
+// active. It reports the current frame number, configured length, elapsed and
+// remaining time within the frame, the number of visible rows, and which frame
+// the user is viewing. Must be called with state.mu held.
 func buildStatusLocked(frameSeconds float64, frameStart, now time.Time, rows []resultRow) string {
 	frameIndex := state.frameIndex
 	hideSmall := state.hideSmall
@@ -42,6 +46,14 @@ func buildStatusLocked(frameSeconds float64, frameStart, now time.Time, rows []r
 	)
 }
 
+// renderTable converts a slice of result rows into the tab-separated text
+// payload consumed by the Cocoa table view. Each line contains:
+//
+//	PID \t CPU-seconds \t HH:MM:SS \t command
+//
+// Rows below 1 CPU-second are filtered out when hideSmall is true. Output is
+// capped at 500 rows to keep the UI responsive. Tabs and newlines in command
+// strings are replaced by spaces via sanitizeCommand.
 func renderTable(rows []resultRow, hideSmall, hidePaths bool) string {
 	filtered := make([]resultRow, 0, len(rows))
 	for _, row := range rows {
@@ -66,6 +78,15 @@ func renderTable(rows []resultRow, hideSmall, hidePaths bool) string {
 	return b.String()
 }
 
+// renderSummaryTable aggregates CPU usage across all completed frames and
+// returns a tab-separated payload for the summary table view. Each line
+// contains:
+//
+//	PID \t total-s \t avg-s \t total-HH:MM:SS \t avg-HH:MM:SS \t command
+//
+// Averages are computed over the total number of completed frames (not just
+// the frames in which a process appeared). Output is capped at 500 rows.
+// Returns an empty string if no frames have completed yet.
 func renderSummaryTable(history []frameRecord, hideSmall, hidePaths bool) string {
 	frameCount := len(history)
 	if frameCount == 0 {
@@ -134,6 +155,10 @@ func renderSummaryTable(history []frameRecord, hideSmall, hidePaths bool) string
 	return b.String()
 }
 
+// sanitizeCommand prepares a raw command string for display. If hidePaths is
+// true only the basename of the executable is kept (arguments are dropped).
+// Tabs and newlines are replaced with spaces to preserve the integrity of the
+// tab-separated table format.
 func sanitizeCommand(command string, hidePaths bool) string {
 	if hidePaths {
 		command = baseCommand(command)
@@ -143,6 +168,9 @@ func sanitizeCommand(command string, hidePaths bool) string {
 	return command
 }
 
+// baseCommand extracts the basename of the first whitespace-delimited token in
+// command (i.e. the executable path), discarding any arguments. Returns the
+// original string unchanged if it contains no fields.
 func baseCommand(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
@@ -152,6 +180,8 @@ func baseCommand(command string) string {
 	return parts[len(parts)-1]
 }
 
+// formatDuration formats a duration expressed as fractional seconds into the
+// human-readable HH:MM:SS string used in both table views.
 func formatDuration(seconds float64) string {
 	total := int(seconds)
 	hours := total / 3600

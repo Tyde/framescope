@@ -1,43 +1,117 @@
+/*
+ * cocoa_bridge.m -- AppKit UI implementation for FrameScope.
+ *
+ * This file owns the entire native macOS UI: window, toolbar, split view, two
+ * table views, and the status bar. It communicates with the Go layer through
+ * the C functions declared in cocoa_bridge.h:
+ *
+ *  Go -> Cocoa  UpdateResults / ShowErrorMessage  (called from ui_bridge.go)
+ *  Cocoa -> Go  GoStartMonitoring, GoStopMonitoring, GoSet*, GoSelectFrame
+ *               (called in response to user actions)
+ *
+ * All UI mutations must happen on the main thread. Go calls UpdateResults and
+ * ShowErrorMessage from arbitrary goroutines; both functions dispatch their
+ * work asynchronously onto the main queue before touching any AppKit objects.
+ *
+ * Layout overview (top-to-bottom inside the content view):
+ *
+ *   +-------------------------------------+  <- NSToolbar (managed by AppKit)
+ *   |  Frame (s): [__]  [Start] [Stop]    |    RecordingItem
+ *   |  [< Prev] [popup] [Next >]          |    NavigationItem
+ *   |                          [Settings] |    OptionsItem
+ *   +-------------------------------------+
+ *   |  Current Frame         (header 22px)|
+ *   |  NSTableView (resultsTable)         |  <- frame pane (~58%)
+ *   |  PID | Raw(s) | CPU Time | Command  |
+ *   +- - - - - - - - - - - - - - - - - - +  <- NSSplitView thin divider
+ *   |  Summary -- Totals & Averages       |
+ *   |  NSTableView (summaryTable)         |  <- summary pane (~42%)
+ *   |  PID | Total | Avg | ... | Command  |
+ *   +-------------------------------------+
+ *   |  status text                   24px |  <- status bar (fixed, bottom)
+ *   +-------------------------------------+
+ */
+
 #import <Cocoa/Cocoa.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include "cocoa_bridge.h"
 
+/** Version string set by SetAppVersion() before RunApp() is called. */
 static NSString *gAppVersion = @"dev";
 
+/* Toolbar item identifier constants. */
 static NSString * const kRecordingItem  = @"RecordingItem";
 static NSString * const kNavigationItem = @"NavigationItem";
 static NSString * const kOptionsItem    = @"OptionsItem";
 
+/**
+ * MonitorAppDelegate is the single NSApplicationDelegate for FrameScope.
+ * It also acts as NSTableViewDataSource and NSTableViewDelegate for both
+ * table views, and as NSToolbarDelegate for the main toolbar.
+ *
+ * Table data is stored as pre-parsed arrays of string arrays (frameRows /
+ * summaryRows) populated by applyRowsPayload: / applySummaryPayload: whenever
+ * Go pushes a new update. The delegate methods simply index into these arrays.
+ */
 @interface MonitorAppDelegate : NSObject <NSApplicationDelegate,
                                           NSTableViewDataSource,
                                           NSTableViewDelegate,
                                           NSToolbarDelegate>
+
+/* Main window. */
 @property(nonatomic, strong) NSWindow      *window;
+
+/* RecordingItem controls. */
 @property(nonatomic, strong) NSTextField   *frameField;
 @property(nonatomic, strong) NSButton      *startButton;
 @property(nonatomic, strong) NSButton      *stopButton;
+
+/* OptionsItem controls. */
 @property(nonatomic, strong) NSButton      *settingsButton;
 @property(nonatomic, strong) NSMenuItem    *hideSmallMenuItem;
 @property(nonatomic, strong) NSMenuItem    *hidePathsMenuItem;
+
+/* NavigationItem controls. */
 @property(nonatomic, strong) NSPopUpButton *historyPopup;
 @property(nonatomic, strong) NSButton      *previousFrameButton;
 @property(nonatomic, strong) NSButton      *nextFrameButton;
+
+/* Status bar label (bottom of content view). */
 @property(nonatomic, strong) NSTextField   *statusLabel;
+
+/* Frame pane (top split). */
 @property(nonatomic, strong) NSScrollView  *tableScrollView;
 @property(nonatomic, strong) NSTableView   *resultsTable;
-@property(nonatomic, strong) NSTextField   *emptyLabel;
+@property(nonatomic, strong) NSTextField   *emptyLabel;       /* shown when no rows */
+
+/* Summary pane (bottom split). */
 @property(nonatomic, strong) NSScrollView  *summaryScrollView;
 @property(nonatomic, strong) NSTableView   *summaryTable;
 @property(nonatomic, strong) NSTextField   *summaryEmptyLabel;
+
+/* Table data — arrays of column-value arrays, indexed by row. */
 @property(nonatomic, copy) NSArray<NSArray<NSString *> *> *frameRows;
 @property(nonatomic, copy) NSArray<NSArray<NSString *> *> *summaryRows;
-@property(nonatomic, copy) NSArray<NSString *>             *historyItems;
+
+/* Frame labels displayed in the history popup. */
+@property(nonatomic, copy) NSArray<NSString *> *historyItems;
+
+/**
+ * Guard flag set to YES while programmatically updating historyPopup selection
+ * to prevent re-entrant calls back into GoSelectFrame.
+ */
 @property(nonatomic, assign) BOOL updatingHistorySelection;
+
 @end
 
 @implementation MonitorAppDelegate
 
+/**
+ * applyAppIcon loads FrameScopeIcon.png from the working directory and sets it
+ * as the application Dock icon. Silently skipped if the file is not found
+ * (e.g. when running from a built .app bundle that uses the .icns resource).
+ */
 - (void)applyAppIcon {
     NSString *cwd = [[NSFileManager defaultManager] currentDirectoryPath];
     NSString *iconPath = [cwd stringByAppendingPathComponent:@"FrameScopeIcon.png"];
@@ -50,11 +124,13 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - NSToolbarDelegate
 
+/** Returns all item identifiers the toolbar is allowed to contain. */
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
     (void)toolbar;
     return @[kRecordingItem, kNavigationItem, kOptionsItem, NSToolbarFlexibleSpaceItemIdentifier];
 }
 
+/** Returns the default left-to-right toolbar layout. */
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
     (void)toolbar;
     return @[kRecordingItem, NSToolbarFlexibleSpaceItemIdentifier,
@@ -62,6 +138,18 @@ static NSString * const kOptionsItem    = @"OptionsItem";
              kOptionsItem];
 }
 
+/**
+ * Constructs and returns the NSToolbarItem for the given identifier.
+ *
+ * RecordingItem  — "Frame (s):" label + text field + Start + Stop buttons.
+ * NavigationItem — ‹ Prev button + history popup + Next › button.
+ * OptionsItem    — Settings button with a drop-down menu containing the two
+ *                  filter toggles (Hide <1s, Show basenames only).
+ *
+ * minSize/maxSize are set to fix each item's width. The deprecation warning for
+ * those properties is suppressed; they remain the only reliable way to constrain
+ * custom-view toolbar items across all supported macOS versions.
+ */
 - (NSToolbarItem *)toolbar:(NSToolbar *)toolbar
      itemForItemIdentifier:(NSToolbarItemIdentifier)identifier
  willBeInsertedIntoToolbar:(BOOL)flag {
@@ -180,6 +268,17 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - Application Lifecycle
 
+/**
+ * Builds the entire window hierarchy programmatically:
+ *  1. Creates and centres the main window with the version in its title.
+ *  2. Attaches the NSToolbar.
+ *  3. Pins a 24 pt status bar to the bottom of the content view.
+ *  4. Fills the remaining space with an NSSplitView containing the frame pane
+ *     (top, ~58 %) and the summary pane (bottom, ~42 %).
+ *  5. Configures both NSTableViews with their columns and delegates.
+ *  6. Makes the window key and starts monitoring immediately with the last
+ *     saved frame length.
+ */
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
 
@@ -329,11 +428,14 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    // Defer the initial monitoring start until after the run loop is active so
+    // the first UI push lands on an already-running main queue.
     dispatch_async(dispatch_get_main_queue(), ^{
         GoStartMonitoring(self.frameField.doubleValue);
     });
 }
 
+/** Stops monitoring and terminates the app when the last window is closed. */
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     (void)sender;
     GoStopMonitoring();
@@ -342,16 +444,22 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - Actions
 
+/** Reads the current frame-field value and starts a new monitoring run. */
 - (void)startPressed:(id)sender {
     (void)sender;
     GoStartMonitoring(self.frameField.doubleValue);
 }
 
+/** Stops the active monitoring run. */
 - (void)stopPressed:(id)sender {
     (void)sender;
     GoStopMonitoring();
 }
 
+/**
+ * Toggles the "Hide processes below 1s" menu item state and propagates the
+ * change to Go.
+ */
 - (void)hideSmallToggled:(id)sender {
     (void)sender;
     self.hideSmallMenuItem.state =
@@ -359,6 +467,10 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     GoSetHideSmall(self.hideSmallMenuItem.state == NSControlStateValueOn ? 1 : 0);
 }
 
+/**
+ * Toggles the "Show basenames only" menu item state and propagates the change
+ * to Go.
+ */
 - (void)hidePathsToggled:(id)sender {
     (void)sender;
     self.hidePathsMenuItem.state =
@@ -366,6 +478,7 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     GoSetHidePaths(self.hidePathsMenuItem.state == NSControlStateValueOn ? 1 : 0);
 }
 
+/** Pops the Settings drop-down menu directly below the Settings button. */
 - (void)showSettingsMenu:(id)sender {
     NSButton *button = (NSButton *)sender;
     if (button.menu == nil) return;
@@ -374,12 +487,18 @@ static NSString * const kOptionsItem    = @"OptionsItem";
                                    inView:button];
 }
 
+/**
+ * Called when the user picks an item in the history popup. The guard flag
+ * updatingHistorySelection prevents this from firing during programmatic
+ * selection changes made by applyHistoryPayload:.
+ */
 - (void)historyChanged:(id)sender {
     (void)sender;
     if (self.updatingHistorySelection) return;
     GoSelectFrame((int)self.historyPopup.indexOfSelectedItem);
 }
 
+/** Moves selection one step earlier in the history popup. */
 - (void)previousFrame:(id)sender {
     (void)sender;
     NSInteger index = self.historyPopup.indexOfSelectedItem;
@@ -389,6 +508,7 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     }
 }
 
+/** Moves selection one step later in the history popup. */
 - (void)nextFrame:(id)sender {
     (void)sender;
     NSInteger index = self.historyPopup.indexOfSelectedItem;
@@ -400,12 +520,19 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - NSTableViewDataSource / Delegate
 
+/** Returns the number of rows for the given table view. */
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
     return (tableView == self.summaryTable)
         ? (NSInteger)self.summaryRows.count
         : (NSInteger)self.frameRows.count;
 }
 
+/**
+ * Returns a cell view for the given table/column/row combination. Cells are
+ * reused from the table's view pool. Each cell is a non-editable, selectable
+ * NSTextField using the system monospaced font at 12 pt. The full cell value
+ * is also set as the tooltip so truncated content remains readable.
+ */
 - (nullable NSView *)tableView:(NSTableView *)tableView
             viewForTableColumn:(NSTableColumn *)tableColumn
                            row:(NSInteger)row {
@@ -432,6 +559,11 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - Data Updates
 
+/**
+ * Parses a tab-separated, newline-delimited payload string into a 2-D array
+ * of strings suitable for direct use by the table data source. Each row is
+ * padded with empty strings to guarantee at least n columns.
+ */
 - (NSArray<NSArray<NSString *> *> *)parseRows:(NSString *)payload columns:(NSUInteger)n {
     NSMutableArray *result = [NSMutableArray array];
     for (NSString *line in [payload componentsSeparatedByCharactersInSet:
@@ -444,18 +576,32 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     return result;
 }
 
+/**
+ * Replaces the frame table data with the parsed payload and reloads the table.
+ * Must be called on the main thread.
+ */
 - (void)applyRowsPayload:(NSString *)payload {
     self.frameRows = [self parseRows:payload columns:4];
     [self.resultsTable reloadData];
     [self refreshEmptyState];
 }
 
+/**
+ * Replaces the summary table data with the parsed payload and reloads the
+ * table. Must be called on the main thread.
+ */
 - (void)applySummaryPayload:(NSString *)payload {
     self.summaryRows = [self parseRows:payload columns:6];
     [self.summaryTable reloadData];
     [self refreshEmptyState];
 }
 
+/**
+ * Rebuilds the history popup items from the newline-separated payload and
+ * selects the item at selectedIndex (-1 leaves the selection unchanged).
+ * Sets updatingHistorySelection to suppress the historyChanged: callback
+ * while modifying the popup programmatically. Must be called on the main thread.
+ */
 - (void)applyHistoryPayload:(NSString *)payload selectedIndex:(NSInteger)selectedIndex {
     NSMutableArray<NSString *> *items = [NSMutableArray array];
     for (NSString *s in [payload componentsSeparatedByCharactersInSet:
@@ -477,11 +623,20 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     [self refreshHistoryControls];
 }
 
+/**
+ * Shows or hides the "empty" placeholder labels based on whether the
+ * corresponding table has any rows. Must be called on the main thread.
+ */
 - (void)refreshEmptyState {
     self.emptyLabel.hidden = (self.frameRows.count != 0);
     self.summaryEmptyLabel.hidden = (self.summaryRows.count != 0);
 }
 
+/**
+ * Enables or disables the Prev/Next buttons and the history popup depending on
+ * whether any frames are available and which item is currently selected.
+ * Must be called on the main thread.
+ */
 - (void)refreshHistoryControls {
     BOOL has = (self.historyItems.count > 0);
     self.historyPopup.enabled = has;
@@ -492,6 +647,10 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - Helpers
 
+/**
+ * Creates a standard read-only, non-editable NSTextField label pre-filled with
+ * value, sized and positioned by frame.
+ */
 - (NSTextField *)makeLabel:(NSString *)value frame:(NSRect)frame {
     NSTextField *lbl = [[NSTextField alloc] initWithFrame:frame];
     lbl.stringValue = value;
@@ -502,7 +661,10 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     return lbl;
 }
 
-// A lightweight section-header bar: semibold label + bottom separator line.
+/**
+ * Creates a lightweight section-header view: a semibold 11 pt secondary-colour
+ * label above a 1 pt NSBox separator line, 22 pt tall.
+ */
 - (NSView *)makeSectionHeader:(NSString *)title width:(CGFloat)width {
     NSView *c = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, 22)];
 
@@ -520,6 +682,11 @@ static NSString * const kOptionsItem    = @"OptionsItem";
     return c;
 }
 
+/**
+ * Creates an NSTableColumn with the given identifier, title, preferred width,
+ * and minimum width. Resizing is user-controlled only (no auto-resizing by
+ * default; the Command column overrides this after construction).
+ */
 - (NSTableColumn *)columnWithID:(NSString *)identifier
                           title:(NSString *)title
                           width:(CGFloat)width
@@ -536,14 +703,24 @@ static NSString * const kOptionsItem    = @"OptionsItem";
 
 #pragma mark - C interface
 
+/** Singleton delegate; set once in RunApp() and never changed. */
 static MonitorAppDelegate *delegate;
 
+/**
+ * SetAppVersion stores version in gAppVersion. Must be called before RunApp()
+ * so the string is available when applicationDidFinishLaunching: sets the
+ * window title.
+ */
 void SetAppVersion(const char *version) {
     if (version) {
         gAppVersion = [NSString stringWithUTF8String:version];
     }
 }
 
+/**
+ * RunApp creates the shared NSApplication, installs MonitorAppDelegate, and
+ * starts the Cocoa event loop. Never returns.
+ */
 void RunApp(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -554,6 +731,11 @@ void RunApp(void) {
     }
 }
 
+/**
+ * UpdateResults is called from Go (ui_bridge.go) to push a complete UI
+ * refresh. It converts the C strings to NSString and dispatches the actual
+ * table/popup/status updates asynchronously onto the main queue.
+ */
 void UpdateResults(const char *status, const char *tableText,
                    const char *summaryText, const char *historyText,
                    int selectedIndex) {
@@ -569,6 +751,10 @@ void UpdateResults(const char *status, const char *tableText,
     });
 }
 
+/**
+ * ShowErrorMessage is called from Go (ui_bridge.go) to display an error in the
+ * status bar and clear both tables. Dispatches to the main queue.
+ */
 void ShowErrorMessage(const char *message) {
     NSString *text = [NSString stringWithUTF8String:message ?: "Unknown error"];
     dispatch_async(dispatch_get_main_queue(), ^{

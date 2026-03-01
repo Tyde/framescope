@@ -8,6 +8,17 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
+// runMonitor is the core sampling loop. It runs in its own goroutine and is
+// cancelled via ctx when the user stops monitoring or starts a new run.
+//
+// The loop ticks every 500 ms. On each tick it takes a snapshot of all running
+// processes, diffs the CPU times against the baseline, updates liveRows in the
+// shared state, and pushes a UI refresh. When the elapsed time reaches
+// frameSeconds the current snapshot becomes the baseline for the next frame, the
+// completed frame is appended to history, and the cycle resets.
+//
+// runID is compared against state.runID on every write to detect stale goroutines
+// from previous runs.
 func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 	baseline, err := snapshot()
 	if err != nil {
@@ -21,6 +32,9 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	// updateFrame takes a fresh snapshot, computes results, updates state, and
+	// pushes a UI refresh. If the frame duration has elapsed it also finalises
+	// the completed frame and resets the baseline.
 	updateFrame := func(now time.Time) error {
 		current, err := snapshot()
 		if err != nil {
@@ -40,6 +54,9 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 				state.mu.Unlock()
 				return nil
 			}
+			// maxHistory caps the number of retained completed frames. When the
+			// limit is exceeded the oldest entry is discarded and selectedHistoryIdx
+			// is adjusted so the UI selection remains stable.
 			const maxHistory = 1000
 			completedFrameIndex := state.frameIndex
 			state.history = append(state.history, frameRecord{
@@ -71,6 +88,7 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 		return nil
 	}
 
+	// Take an immediate first snapshot so the UI is not blank for the first tick.
 	if err := updateFrame(frameStart); err != nil {
 		postError(runID, fmt.Sprintf("Snapshot failed: %v", err))
 	}
@@ -87,6 +105,10 @@ func runMonitor(ctx context.Context, runID int64, frameSeconds float64) {
 	}
 }
 
+// stopFromWorker marks monitoring as stopped in the global state. It is called
+// by the monitor goroutine itself when it encounters a fatal error. It is a
+// no-op if runID no longer matches state.runID (i.e. a newer run has already
+// started).
 func stopFromWorker(runID int64) {
 	state.mu.Lock()
 	if state.runID != runID {
@@ -98,6 +120,11 @@ func stopFromWorker(runID int64) {
 	state.mu.Unlock()
 }
 
+// snapshot reads the current CPU times and command for every running process
+// and returns them keyed by PID. Processes that cannot be queried (e.g. due to
+// insufficient permissions) are silently skipped. A best-effort command string
+// is derived by preferring the full command line and falling back to the process
+// name.
 func snapshot() (map[int]processSample, error) {
 	processes, err := process.Processes()
 	if err != nil {

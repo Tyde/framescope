@@ -6,6 +6,11 @@ import (
 	"path/filepath"
 )
 
+// configPath returns the absolute path to the application's JSON config file:
+//
+//	~/Library/Application Support/FrameScope/config.json
+//
+// The directory is not guaranteed to exist; callers that write must create it.
 func configPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -14,12 +19,16 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "FrameScope", "config.json"), nil
 }
 
+// appConfig is the serialised form of user preferences persisted to disk.
 type appConfig struct {
 	HideSmall    bool    `json:"hide_small"`
 	HidePaths    bool    `json:"hide_paths"`
 	FrameSeconds float64 `json:"frame_seconds"`
 }
 
+// initializeConfig loads persisted settings from disk and applies them to the
+// global state before the UI starts. Errors are silently ignored — missing or
+// malformed config files are treated as "use defaults".
 func initializeConfig() {
 	path, err := configPath()
 	if err != nil {
@@ -44,6 +53,9 @@ func initializeConfig() {
 	state.mu.Unlock()
 }
 
+// saveConfig writes the current user preferences to disk as JSON. The config
+// directory is created if it does not already exist. Write errors are silently
+// ignored — a failed save does not affect the running session.
 func saveConfig() {
 	state.mu.Lock()
 	cfg := appConfig{
